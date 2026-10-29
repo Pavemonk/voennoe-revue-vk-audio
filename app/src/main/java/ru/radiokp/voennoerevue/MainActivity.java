@@ -15,6 +15,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.view.View;
+import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceRequest;
@@ -48,6 +50,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private TextView statusView;
     private Button playPauseButton;
     private WebView webView;
+    private LinearLayout webViewContainer;
     private AudioPlaybackService playbackService;
     private boolean bound = false;
     private String currentPageUrl = VK_LIVES_URL;
@@ -70,8 +73,6 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         super.onCreate(savedInstanceState);
         requestNotificationPermissionIfNeeded();
         buildUi();
-        configureWebView();
-        webView.loadUrl(VK_LIVES_URL);
     }
 
     private void requestNotificationPermissionIfNeeded() {
@@ -87,14 +88,14 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         root.setPadding(dp(16), dp(16), dp(16), dp(12));
 
         TextView title = new TextView(this);
-        title.setText("ВОЕННОЕ РЕВЮ");
+        title.setText("РАДИО КП");
         title.setTextColor(Color.WHITE);
         title.setTextSize(22);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         root.addView(title, new LinearLayout.LayoutParams(-1, -2));
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Полковник Баранец · 16:00–17:00 МСК");
+        subtitle.setText("Прямая трансляция · 16:00–17:00 МСК");
         subtitle.setTextColor(Color.rgb(174, 183, 197));
         subtitle.setTextSize(14);
         LinearLayout.LayoutParams subtitleParams = new LinearLayout.LayoutParams(-1, -2);
@@ -103,7 +104,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         root.addView(subtitle, subtitleParams);
 
         statusView = new TextView(this);
-        statusView.setText("Загружаю страницу прямых эфиров VK. Выберите текущий эфир, если он не откроется автоматически.");
+        statusView.setText("Нажмите «Найти эфир», чтобы подключиться к прямой трансляции VK. После подключения страница будет закрыта.");
         statusView.setTextColor(Color.rgb(220, 225, 233));
         statusView.setTextSize(14);
         statusView.setPadding(dp(12), dp(10), dp(12), dp(10));
@@ -114,7 +115,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         controls.setOrientation(LinearLayout.HORIZONTAL);
         controls.setPadding(0, dp(10), 0, dp(10));
         Button openButton = new Button(this);
-        openButton.setText("VK эфиры");
+        openButton.setText("НАЙТИ ЭФИР");
         openButton.setOnClickListener(v -> openVkLives());
         controls.addView(openButton, new LinearLayout.LayoutParams(0, dp(48), 1));
 
@@ -133,17 +134,46 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         controls.addView(stopButton, stopParams);
         root.addView(controls, new LinearLayout.LayoutParams(-1, -2));
 
-        webView = new WebView(this);
-        webView.setBackgroundColor(Color.rgb(17, 20, 26));
-        root.addView(webView, new LinearLayout.LayoutParams(-1, 0, 1));
+        webViewContainer = new LinearLayout(this);
+        webViewContainer.setOrientation(LinearLayout.VERTICAL);
+        webViewContainer.setBackgroundColor(Color.rgb(17, 20, 26));
+        webViewContainer.setVisibility(View.GONE);
+        root.addView(webViewContainer, new LinearLayout.LayoutParams(-1, 0, 1));
 
         TextView footer = new TextView(this);
-        footer.setText("Аудио без видеодорожки · VK Видео");
+        footer.setText("VK Видео · только звук · страница закрывается после подключения");
         footer.setTextColor(Color.rgb(135, 145, 160));
         footer.setTextSize(12);
         footer.setPadding(0, dp(8), 0, 0);
         root.addView(footer, new LinearLayout.LayoutParams(-1, -2));
         setContentView(root);
+    }
+
+    private void createWebViewIfNeeded() {
+        if (webView != null) return;
+        webView = new WebView(this);
+        webView.setBackgroundColor(Color.rgb(17, 20, 26));
+        webViewContainer.addView(webView, new LinearLayout.LayoutParams(-1, -1));
+        configureWebView();
+    }
+
+    /** Fully dispose of the embedded browser once the audio URL has been resolved. */
+    private void releaseWebView() {
+        WebView old = webView;
+        webView = null;
+        if (old != null) {
+            try { old.stopLoading(); } catch (Exception ignored) { }
+            try { old.removeJavascriptInterface("AudioBridge"); } catch (Exception ignored) { }
+            try { old.setWebViewClient(null); } catch (Exception ignored) { }
+            try { old.setWebChromeClient(null); } catch (Exception ignored) { }
+            try {
+                if (old.getParent() instanceof ViewGroup) {
+                    ((ViewGroup) old.getParent()).removeView(old);
+                }
+            } catch (Exception ignored) { }
+            try { old.destroy(); } catch (Exception ignored) { }
+        }
+        if (webViewContainer != null) webViewContainer.setVisibility(View.GONE);
     }
 
     private void configureWebView() {
@@ -342,23 +372,32 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         if (url == null || streamStarted) return;
         streamStarted = true;
         runOnUiThread(() -> {
-            statusView.setText("Поток VK найден. Запускаю аудио без видеодорожки…");
-            // Stop the embedded page player to avoid duplicate sound; Media3 now plays the audio-only HLS track.
-            if (webView != null) webView.evaluateJavascript("document.querySelectorAll('video').forEach(function(v){try{v.muted=true;v.pause()}catch(e){}})", null);
-            Intent intent = new Intent(this, AudioPlaybackService.class)
-                    .setAction(AudioPlaybackService.ACTION_PLAY)
-                    .putExtra(AudioPlaybackService.EXTRA_URL, url)
-                    .putExtra(AudioPlaybackService.EXTRA_REFERER, "https://vkvideo.ru/");
-            if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent); else startService(intent);
-            webView.setVisibility(WebView.GONE);
-            updateControls();
+            statusView.setText("Поток VK найден. Запускаю аудио…");
+            Runnable startNativePlayback = () -> {
+                // Destroy the whole WebView, not merely hide it: VK's page and JavaScript can use substantial RAM.
+                releaseWebView();
+                Intent intent = new Intent(this, AudioPlaybackService.class)
+                        .setAction(AudioPlaybackService.ACTION_PLAY)
+                        .putExtra(AudioPlaybackService.EXTRA_URL, url)
+                        .putExtra(AudioPlaybackService.EXTRA_REFERER, "https://vkvideo.ru/");
+                if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent); else startService(intent);
+                updateControls();
+            };
+            if (webView != null) {
+                // Stop the VK player first so it cannot continue audio/video alongside Media3.
+                webView.evaluateJavascript("document.querySelectorAll('video').forEach(function(v){try{v.muted=true;v.pause()}catch(e){}})",
+                        value -> runOnUiThread(startNativePlayback));
+            } else {
+                startNativePlayback.run();
+            }
         });
     }
 
     private void openVkLives() {
         streamStarted = false;
-        webView.setVisibility(WebView.VISIBLE);
-        statusView.setText("Откройте актуальную трансляцию. Программа пойдёт только звуком.");
+        statusView.setText("Открываю список прямых эфиров VK. Выберите текущий эфир, если он не запустится автоматически.");
+        createWebViewIfNeeded();
+        webViewContainer.setVisibility(View.VISIBLE);
         webView.loadUrl(VK_LIVES_URL);
     }
 
@@ -375,8 +414,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private void stopPlayback() {
         if (playbackService != null) playbackService.stopPlayback();
         streamStarted = false;
-        webView.setVisibility(WebView.VISIBLE);
-        statusView.setText("Остановлено. Для следующего эфира откройте VK.");
+        releaseWebView();
+        statusView.setText("Остановлено. Для следующего эфира нажмите «Найти эфир».");
         updateControls();
     }
 
@@ -419,6 +458,11 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     @Override protected void onStop() {
+        // If the user leaves while still browsing VK and no stream has been found,
+        // release the page to avoid leaving a heavy WebView running in the background.
+        if (webView != null && !streamStarted && (playbackService == null || !playbackService.hasStream())) {
+            releaseWebView();
+        }
         if (bound) {
             if (playbackService != null) playbackService.clearPlaybackStateListener();
             unbindService(serviceConnection);
@@ -429,21 +473,18 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     @Override public void onBackPressed() {
-        if (webView != null && webView.getVisibility() == WebView.VISIBLE && webView.canGoBack()) {
+        if (webView != null && webViewContainer.getVisibility() == View.VISIBLE && webView.canGoBack()) {
             webView.goBack();
-        } else if (webView != null && webView.getVisibility() == WebView.GONE) {
-            webView.setVisibility(WebView.VISIBLE);
+        } else if (webView != null) {
+            releaseWebView();
+            statusView.setText("Страница VK закрыта. Аудио продолжит играть, если эфир уже запущен.");
         } else {
             super.onBackPressed();
         }
     }
 
     @Override protected void onDestroy() {
-        if (webView != null) {
-            webView.removeJavascriptInterface("AudioBridge");
-            webView.stopLoading();
-            webView.destroy();
-        }
+        releaseWebView();
         super.onDestroy();
     }
 }

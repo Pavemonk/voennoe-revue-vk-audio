@@ -8,7 +8,7 @@
 
     <application
         android:allowBackup="false"
-        android:label="Военное ревю — аудио"
+        android:label="Радио КП — Прямой эфир"
         android:usesCleartextTraffic="false"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:supportsRtl="true">

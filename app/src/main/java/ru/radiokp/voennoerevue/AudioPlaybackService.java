@@ -37,7 +37,7 @@ public final class AudioPlaybackService extends Service {
     public static final String EXTRA_URL = "stream_url";
     public static final String EXTRA_REFERER = "referer";
 
-    private static final String CHANNEL_ID = "voennoe_revue_audio";
+    private static final String CHANNEL_ID = "radio_kp_live_audio_v2";
     private static final int NOTIFICATION_ID = 6107;
     private static final String USER_AGENT = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
 
@@ -76,14 +76,14 @@ public final class AudioPlaybackService extends Service {
         player.addListener(new Player.Listener() {
             @Override public void onIsPlayingChanged(boolean isPlaying) {
                 updateNotification();
-                notifyListener(isPlaying, isPlaying ? "Идёт эфир VK — только аудио" : "Воспроизведение приостановлено");
+                notifyListener(isPlaying, isPlaying ? "Радио КП: идёт прямой эфир — только аудио" : "Воспроизведение приостановлено");
             }
 
             @Override public void onPlaybackStateChanged(int state) {
                 if (state == Player.STATE_BUFFERING) {
                     notifyListener(player.isPlaying(), "Подключение к трансляции VK…");
                 } else if (state == Player.STATE_READY) {
-                    notifyListener(player.isPlaying(), player.isPlaying() ? "Идёт эфир VK — только аудио" : "Поток готов");
+                    notifyListener(player.isPlaying(), player.isPlaying() ? "Радио КП: идёт прямой эфир — только аудио" : "Поток готов");
                 } else if (state == Player.STATE_ENDED) {
                     notifyListener(false, "Трансляция завершена");
                 }
@@ -201,7 +201,7 @@ public final class AudioPlaybackService extends Service {
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "Военное ревю — аудио", NotificationManager.IMPORTANCE_LOW);
+            NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "Радио КП — Прямой эфир", NotificationManager.IMPORTANCE_LOW);
             channel.setDescription("Управление аудиотрансляцией VK Видео");
             NotificationManager manager = getSystemService(NotificationManager.class);
             if (manager != null) manager.createNotificationChannel(channel);
@@ -221,7 +221,7 @@ public final class AudioPlaybackService extends Service {
         boolean playing = player != null && player.isPlaying();
         NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setSmallIcon(playing ? android.R.drawable.ic_media_play : android.R.drawable.ic_media_pause)
-                .setContentTitle("Военное ревю — аудио")
+                .setContentTitle("Радио КП — Прямой эфир")
                 .setContentText(playing ? "Идёт трансляция VK" : (currentUrl.isEmpty() ? "Остановлено" : "Пауза"))
                 .setContentIntent(content)
                 .setOnlyAlertOnce(true)
