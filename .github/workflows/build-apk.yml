@@ -34,7 +34,8 @@ jobs:
           unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
 
       - name: Build APK
-        run: "$RUNNER_TEMP/gradle-8.10.2/bin/gradle" --no-daemon assembleDebug
+        run: |
+          "$RUNNER_TEMP/gradle-8.10.2/bin/gradle" --no-daemon assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
