@@ -615,7 +615,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private static final String INSTALL_RUTUBE_HOOK_SCRIPT = "(function(){try{if(window.__radioKpRutubeHook)return;window.__radioKpRutubeHook=true;" +
             "function hideVideo(){try{document.querySelectorAll('video').forEach(function(v){v.style.setProperty('position','fixed','important');v.style.setProperty('left','-5px','important');v.style.setProperty('top','-5px','important');v.style.setProperty('width','1px','important');v.style.setProperty('height','1px','important');v.style.setProperty('opacity','0.001','important');v.style.setProperty('pointer-events','none','important');v.controls=false;v.muted=true;try{v.pause();v.removeAttribute('autoplay')}catch(e){}})}catch(e){}}" +
             "hideVideo();try{new MutationObserver(hideVideo).observe(document.documentElement,{childList:true,subtree:true})}catch(e){}" +
-            "function report(t){try{if(typeof t==='string'&&(t.indexOf('video_balancer')!==-1||t.indexOf('live_streams')!==-1||t.indexOf('is_live')!==-1)&&window.AudioBridge)window.AudioBridge.onPossibleStreamText(t)}catch(e){}}" +
+            "function report(t){try{if(typeof t==='string'&&(t.indexOf('video_balancer')!==-1||t.indexOf('live_streams')!==-1||t.indexOf('is_live')!==-1||t.indexOf('is_livestream')!==-1)&&window.AudioBridge)window.AudioBridge.onPossibleStreamText(t)}catch(e){}}" +
             "var f=window.fetch;if(f)window.fetch=function(){return f.apply(this,arguments).then(function(r){try{r.clone().text().then(report)}catch(e){}return r})};" +
             "var op=XMLHttpRequest.prototype.open,se=XMLHttpRequest.prototype.send;" +
             "XMLHttpRequest.prototype.open=function(m,u){this.__radioKpUrl=String(u||'');return op.apply(this,arguments)};" +
@@ -672,21 +672,25 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         if (body == null || body.isEmpty()) return null;
         Object parsed = parseJsonBody(body);
         if (parsed != null) {
-            // Do not accept VOD/archive records: the API must explicitly identify a live stream.
-            if (!containsBooleanFlag(parsed, "is_live", true)) return null;
-            String value = findRutubeLiveHls(parsed);
-            if (isAllowedRutubeHls(value)) return cleanUrl(value);
+            // RUTUBE's live play-options response carries its HLS URLs under live_streams.hls.
+            // That structure is itself a live-only marker; some responses omit a separate is_live flag.
+            String liveUrl = findRutubeLiveHls(parsed);
+            if (isAllowedRutubeHls(liveUrl)) return cleanUrl(liveUrl);
+
+            // If the response uses another HLS field, only accept it with an explicit live flag.
+            boolean explicitlyLive = containsBooleanFlag(parsed, "is_live", true)
+                    || containsBooleanFlag(parsed, "is_livestream", true);
+            if (!explicitlyLive) return null;
         }
-        // Fallback for non-standard JSON formatting. An explicit is_live=true is still required.
-        if (!Pattern.compile("[\"']is_live[\"']\\s*:\\s*(true|1)", Pattern.CASE_INSENSITIVE).matcher(body).find()) return null;
-        Matcher m = Pattern.compile("https?:[^\"'\\s]+?\\.m3u8(?:\\?[^\"'\\s]*)?", Pattern.CASE_INSENSITIVE).matcher(body);
+        // Fallback for non-standard JSON formatting. Require an explicit live marker.
+        if (!Pattern.compile("[\\\"'](?:is_live|is_livestream)[\\\"']\\s*:\\s*(true|1)", Pattern.CASE_INSENSITIVE).matcher(body).find()) return null;
+        Matcher m = Pattern.compile("https?:[^\\\"'\\s]+?\\.m3u8(?:\\?[^\\\"'\\s]*)?", Pattern.CASE_INSENSITIVE).matcher(body);
         while (m.find()) {
             String value = cleanUrl(m.group());
             if (isAllowedRutubeHls(value)) return value;
         }
         return null;
     }
-
     private static Object parseJsonBody(String body) {
         try {
             String trimmed = body.trim();
