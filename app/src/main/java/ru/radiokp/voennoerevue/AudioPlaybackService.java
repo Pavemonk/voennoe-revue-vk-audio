@@ -28,6 +28,11 @@ import androidx.media3.exoplayer.source.ProgressiveMediaSource;
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
 import androidx.media3.datasource.DefaultHttpDataSource;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -67,6 +72,9 @@ public final class AudioPlaybackService extends Service {
     private int maxAudioBitrateKbps = 64;
     private static final int MAX_RADIO_RECONNECT_ATTEMPTS = 2;
     private int radioReconnectAttempts = 0;
+    private int streamGeneration = 0;
+    private String fallbackHlsUrl = "";
+    private boolean usingAudioOnlyHls = false;
     private PlaybackStateListener listener;
 
     private final Runnable connectionTimeout = () -> {
@@ -184,32 +192,266 @@ public final class AudioPlaybackService extends Service {
     }
 
     private void playStream(String url) {
+        handler.removeCallbacks(connectionTimeout);
+        final int generation = ++streamGeneration;
+        fallbackHlsUrl = currentIsMp3 ? "" : url;
+        usingAudioOnlyHls = false;
+
+        if (currentIsMp3) {
+            startProgressivePlayback(url, generation);
+            return;
+        }
+
+        notifyListener(false, "Проверяю HLS на отдельную аудиодорожку…");
+        Thread resolver = new Thread(() -> {
+            String audioOnlyUrl = resolveAudioOnlyPlaylist(url);
+            handler.post(() -> {
+                if (generation != streamGeneration || player == null || !url.equals(currentUrl)) return;
+                if (audioOnlyUrl != null && !audioOnlyUrl.isEmpty()) {
+                    usingAudioOnlyHls = true;
+                    notifyListener(false, "Найдена отдельная аудиодорожка — запускаю аудио без видеосегментов…");
+                    startHlsPlayback(audioOnlyUrl, generation);
+                } else {
+                    notifyListener(false, "Отдельная аудиодорожка не найдена — использую исходный HLS…");
+                    startHlsPlayback(url, generation);
+                }
+            });
+        }, "RadioKp-HlsAudioResolver");
+        resolver.setDaemon(true);
+        resolver.start();
+    }
+
+    private void startProgressivePlayback(String url, int generation) {
         try {
-            handler.removeCallbacks(connectionTimeout);
-            Map<String, String> headers = new HashMap<>();
-            headers.put("Referer", currentReferer);
-            headers.put("Origin", currentReferer.startsWith("https://rutube.ru") ? "https://rutube.ru" : (currentReferer.startsWith("https://radiokp.ru") ? "https://radiokp.ru" : "https://vkvideo.ru"));
-            headers.put("Accept", "*/*");
+            if (generation != streamGeneration || player == null) return;
             DefaultHttpDataSource.Factory httpFactory = new DefaultHttpDataSource.Factory()
                     .setUserAgent(USER_AGENT)
                     .setAllowCrossProtocolRedirects(true)
-                    .setDefaultRequestProperties(headers);
-            if (currentIsMp3) {
-                MediaItem item = new MediaItem.Builder().setUri(url).setMimeType(MimeTypes.AUDIO_MPEG).build();
-                ProgressiveMediaSource source = new ProgressiveMediaSource.Factory(httpFactory).createMediaSource(item);
-                player.setMediaSource(source);
-            } else {
-                MediaItem item = new MediaItem.Builder().setUri(url).build();
-                HlsMediaSource source = new HlsMediaSource.Factory(httpFactory).createMediaSource(item);
-                player.setMediaSource(source);
-            }
-            player.prepare();
-            player.play();
-            updateNotification();
-            notifyListener(false, "Подключение к " + currentSourceName + "…");
-            handler.postDelayed(connectionTimeout, 35000L);
+                    .setDefaultRequestProperties(createStreamHeaders());
+            MediaItem item = new MediaItem.Builder().setUri(url).setMimeType(MimeTypes.AUDIO_MPEG).build();
+            ProgressiveMediaSource source = new ProgressiveMediaSource.Factory(httpFactory).createMediaSource(item);
+            prepareAndPlay(source);
         } catch (Exception e) {
             handlePlaybackFailure(e.getClass().getSimpleName());
+        }
+    }
+
+    private void startHlsPlayback(String url, int generation) {
+        try {
+            if (generation != streamGeneration || player == null) return;
+            DefaultHttpDataSource.Factory httpFactory = new DefaultHttpDataSource.Factory()
+                    .setUserAgent(USER_AGENT)
+                    .setAllowCrossProtocolRedirects(true)
+                    .setDefaultRequestProperties(createStreamHeaders());
+            MediaItem item = new MediaItem.Builder().setUri(url).build();
+            HlsMediaSource source = new HlsMediaSource.Factory(httpFactory).createMediaSource(item);
+            prepareAndPlay(source);
+        } catch (Exception e) {
+            handlePlaybackFailure(e.getClass().getSimpleName());
+        }
+    }
+
+    private Map<String, String> createStreamHeaders() {
+        Map<String, String> headers = new HashMap<>();
+        headers.put("Referer", currentReferer);
+        headers.put("Origin", currentReferer.startsWith("https://rutube.ru")
+                ? "https://rutube.ru"
+                : (currentReferer.startsWith("https://radiokp.ru") ? "https://radiokp.ru" : "https://vkvideo.ru"));
+        headers.put("Accept", "*/*");
+        return headers;
+    }
+
+    private void prepareAndPlay(androidx.media3.exoplayer.source.MediaSource source) {
+        player.setMediaSource(source);
+        player.prepare();
+        player.play();
+        updateNotification();
+        notifyListener(false, "Подключение к " + currentSourceName + "…");
+        handler.removeCallbacks(connectionTimeout);
+        handler.postDelayed(connectionTimeout, 35000L);
+    }
+
+    /**
+     * Reads only the small HLS manifest. If it exposes a distinct AUDIO rendition
+     * or an audio-only variant, return that playlist; otherwise use the original.
+     */
+    private String resolveAudioOnlyPlaylist(String manifestUrl) {
+        HttpURLConnection connection = null;
+        try {
+            URL url = new URL(manifestUrl);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setInstanceFollowRedirects(true);
+            connection.setConnectTimeout(7000);
+            connection.setReadTimeout(7000);
+            connection.setRequestProperty("User-Agent", USER_AGENT);
+            connection.setRequestProperty("Referer", currentReferer);
+            connection.setRequestProperty("Origin", currentReferer.startsWith("https://rutube.ru")
+                    ? "https://rutube.ru"
+                    : (currentReferer.startsWith("https://radiokp.ru") ? "https://radiokp.ru" : "https://vkvideo.ru"));
+            connection.setRequestProperty("Accept", "application/vnd.apple.mpegurl,application/x-mpegURL,*/*");
+            connection.setRequestProperty("Accept-Encoding", "identity");
+
+            int responseCode = connection.getResponseCode();
+            if (responseCode < 200 || responseCode >= 300) return null;
+
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            try (InputStream input = connection.getInputStream()) {
+                byte[] buffer = new byte[8192];
+                int read;
+                int total = 0;
+                while ((read = input.read(buffer)) != -1) {
+                    total += read;
+                    if (total > 512 * 1024) return null;
+                    output.write(buffer, 0, read);
+                }
+            }
+            String manifest = new String(output.toByteArray(), StandardCharsets.UTF_8);
+            return findAudioOnlyPlaylistUrl(connection.getURL().toExternalForm(), manifest);
+        } catch (Exception ignored) {
+            return null;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private String findAudioOnlyPlaylistUrl(String baseUrl, String manifest) {
+        if (manifest == null || !manifest.contains("#EXTM3U")) return null;
+        String[] lines = manifest.replace("\r", "").split("\n");
+        java.util.HashSet<String> referencedAudioGroups = new java.util.HashSet<>();
+
+        for (String line : lines) {
+            if (line.startsWith("#EXT-X-STREAM-INF:")) {
+                Map<String, String> attrs = parseHlsAttributes(line);
+                String group = attrs.get("AUDIO");
+                if (group != null && !group.isEmpty()) referencedAudioGroups.add(group);
+            }
+        }
+
+        String selectedAudioUri = null;
+        int selectedAudioScore = Integer.MIN_VALUE;
+        for (String line : lines) {
+            if (!line.startsWith("#EXT-X-MEDIA:")) continue;
+            Map<String, String> attrs = parseHlsAttributes(line);
+            if (!"AUDIO".equalsIgnoreCase(attrs.get("TYPE"))) continue;
+
+            String group = attrs.get("GROUP-ID");
+            String uri = attrs.get("URI");
+            if (uri == null || uri.isEmpty() || group == null || !referencedAudioGroups.contains(group)) continue;
+
+            String language = attrs.get("LANGUAGE");
+            int score = 0;
+            if (language != null && (language.toLowerCase(Locale.ROOT).startsWith("ru")
+                    || language.toLowerCase(Locale.ROOT).startsWith("rus"))) score += 100;
+            if ("YES".equalsIgnoreCase(attrs.get("DEFAULT"))) score += 20;
+            if ("YES".equalsIgnoreCase(attrs.get("AUTOSELECT"))) score += 10;
+            if (score > selectedAudioScore) {
+                selectedAudioScore = score;
+                selectedAudioUri = uri;
+            }
+        }
+        if (selectedAudioUri != null) return resolveSafePlaylistUri(baseUrl, selectedAudioUri);
+
+        String bestUnderLimit = null;
+        int bestUnderLimitBandwidth = -1;
+        String lowestAudioVariant = null;
+        int lowestAudioBandwidth = Integer.MAX_VALUE;
+        String pendingVariantLine = null;
+        int requestedBandwidth = maxAudioBitrateKbps <= 0
+                ? Integer.MAX_VALUE : maxAudioBitrateKbps * 1000;
+
+        for (String rawLine : lines) {
+            String line = rawLine.trim();
+            if (line.startsWith("#EXT-X-STREAM-INF:")) {
+                pendingVariantLine = line;
+            } else if (pendingVariantLine != null && !line.isEmpty() && !line.startsWith("#")) {
+                Map<String, String> attrs = parseHlsAttributes(pendingVariantLine);
+                if (isAudioOnlyCodecList(attrs.get("CODECS"))) {
+                    int bandwidth = parseBandwidth(attrs.get("AVERAGE-BANDWIDTH"));
+                    if (bandwidth <= 0) bandwidth = parseBandwidth(attrs.get("BANDWIDTH"));
+                    if (bandwidth <= 0) bandwidth = 1;
+
+                    if (bandwidth < lowestAudioBandwidth) {
+                        lowestAudioBandwidth = bandwidth;
+                        lowestAudioVariant = line;
+                    }
+                    if (bandwidth <= requestedBandwidth && bandwidth > bestUnderLimitBandwidth) {
+                        bestUnderLimitBandwidth = bandwidth;
+                        bestUnderLimit = line;
+                    }
+                }
+                pendingVariantLine = null;
+            }
+        }
+
+        String selectedVariant = bestUnderLimit != null ? bestUnderLimit : lowestAudioVariant;
+        return selectedVariant == null ? null : resolveSafePlaylistUri(baseUrl, selectedVariant);
+    }
+
+    private String resolveSafePlaylistUri(String baseUrl, String playlistUri) {
+        String resolved = resolvePlaylistUri(baseUrl, playlistUri);
+        return resolved != null && isAllowedStream(resolved, false) ? resolved : null;
+    }
+
+    private static Map<String, String> parseHlsAttributes(String line) {
+        Map<String, String> attrs = new HashMap<>();
+        int colon = line.indexOf(':');
+        if (colon < 0 || colon == line.length() - 1) return attrs;
+        String text = line.substring(colon + 1);
+        int position = 0;
+        while (position < text.length()) {
+            while (position < text.length() && (text.charAt(position) == ',' || Character.isWhitespace(text.charAt(position)))) position++;
+            int equals = text.indexOf('=', position);
+            if (equals < 0) break;
+            String key = text.substring(position, equals).trim().toUpperCase(Locale.ROOT);
+            position = equals + 1;
+            String value;
+            if (position < text.length() && text.charAt(position) == '"') {
+                int closingQuote = text.indexOf('"', position + 1);
+                if (closingQuote < 0) break;
+                value = text.substring(position + 1, closingQuote);
+                position = closingQuote + 1;
+            } else {
+                int comma = text.indexOf(',', position);
+                if (comma < 0) {
+                    value = text.substring(position).trim();
+                    position = text.length();
+                } else {
+                    value = text.substring(position, comma).trim();
+                    position = comma + 1;
+                }
+            }
+            if (!key.isEmpty()) attrs.put(key, value);
+        }
+        return attrs;
+    }
+
+    private static boolean isAudioOnlyCodecList(String codecs) {
+        if (codecs == null || codecs.trim().isEmpty()) return false;
+        boolean hasAudioCodec = false;
+        String lower = codecs.toLowerCase(Locale.ROOT);
+        for (String rawCodec : lower.split(",")) {
+            String codec = rawCodec.trim();
+            if (codec.startsWith("avc") || codec.startsWith("hvc") || codec.startsWith("hev")
+                    || codec.startsWith("vp8") || codec.startsWith("vp9") || codec.startsWith("vp09")
+                    || codec.startsWith("av01") || codec.startsWith("theora")) return false;
+            if (codec.startsWith("mp4a") || codec.startsWith("ac-3") || codec.startsWith("ec-3")
+                    || codec.startsWith("opus") || codec.startsWith("ac-4") || codec.startsWith("flac")
+                    || codec.startsWith("alac")) hasAudioCodec = true;
+        }
+        return hasAudioCodec;
+    }
+
+    private static int parseBandwidth(String value) {
+        if (value == null) return -1;
+        try { return Integer.parseInt(value.trim()); } catch (Exception ignored) { return -1; }
+    }
+
+    private static String resolvePlaylistUri(String baseUrl, String playlistUri) {
+        try {
+            return new URI(baseUrl).resolve(new URI(playlistUri.trim())).toString();
+        } catch (Exception ignored) {
+            try { return new URL(new URL(baseUrl), playlistUri.trim()).toExternalForm(); }
+            catch (Exception alsoIgnored) { return null; }
         }
     }
 
@@ -235,6 +477,19 @@ public final class AudioPlaybackService extends Service {
     }
 
     private void handlePlaybackFailure(String reason) {
+        if (!currentIsMp3 && usingAudioOnlyHls && !fallbackHlsUrl.isEmpty()) {
+            String fallback = fallbackHlsUrl;
+            usingAudioOnlyHls = false;
+            streamGeneration++;
+            handler.removeCallbacks(connectionTimeout);
+            notifyListener(false, "Отдельная аудиодорожка недоступна. Возвращаюсь к исходному потоку…");
+            if (player != null) {
+                try { player.stop(); } catch (Exception ignored) { }
+                try { player.clearMediaItems(); } catch (Exception ignored) { }
+            }
+            startHlsPlayback(fallback, streamGeneration);
+            return;
+        }
         if (currentIsMp3 && !currentUrl.isEmpty() && radioReconnectAttempts < MAX_RADIO_RECONNECT_ATTEMPTS) {
             radioReconnectAttempts++;
             final String retryUrl = currentUrl;
@@ -254,6 +509,7 @@ public final class AudioPlaybackService extends Service {
     }
 
     private void failCurrentSource(String reason) {
+        streamGeneration++;
         handler.removeCallbacks(connectionTimeout);
         String message = "SOURCE_ERROR: " + (reason == null ? "stream error" : reason);
         notifyListener(false, message);
@@ -277,6 +533,7 @@ public final class AudioPlaybackService extends Service {
     }
 
     private void stopPlaybackAndService() {
+        streamGeneration++;
         handler.removeCallbacks(connectionTimeout);
         if (player != null) {
             player.stop();
@@ -338,6 +595,7 @@ public final class AudioPlaybackService extends Service {
     }
 
     @Override public void onDestroy() {
+        streamGeneration++;
         handler.removeCallbacks(connectionTimeout);
         if (player != null) player.release();
         player = null;
