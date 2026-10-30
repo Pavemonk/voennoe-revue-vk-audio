@@ -9,7 +9,8 @@
     <application
         android:allowBackup="false"
         android:label="Радио КП — Прямой эфир"
-        android:usesCleartextTraffic="false"
+        android:usesCleartextTraffic="true"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:supportsRtl="true">
         <activity
