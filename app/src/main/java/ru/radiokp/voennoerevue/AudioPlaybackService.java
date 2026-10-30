@@ -174,7 +174,8 @@ public final class AudioPlaybackService extends Service {
 
     private void applyTrackSelectionParameters() {
         if (trackSelector == null) return;
-        int maxBitrate = maxAudioBitrateKbps <= 0 ? Integer.MAX_VALUE : maxAudioBitrateKbps * 1000;
+        int maxBitrate = (currentIsMp3 || maxAudioBitrateKbps <= 0)
+                ? Integer.MAX_VALUE : maxAudioBitrateKbps * 1000;
         DefaultTrackSelector.Parameters parameters = trackSelector.buildUponParameters()
                 .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
                 .setMaxAudioBitrate(maxBitrate)
