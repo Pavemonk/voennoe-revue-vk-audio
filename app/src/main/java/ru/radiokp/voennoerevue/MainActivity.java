@@ -161,20 +161,12 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         header.addView(settingsButton, new LinearLayout.LayoutParams(dp(48), dp(44)));
         root.addView(header);
 
-        TextView subtitle = text("ПРЯМОЙ ЭФИР  ·  16:00–17:00 МСК", 13, Color.rgb(255, 112, 64), true);
+        TextView subtitle = text("ПРЯМОЙ ЭФИР  ·  АУДИОТРАНСЛЯЦИЯ", 13, Color.rgb(255, 112, 64), true);
         LinearLayout.LayoutParams subtitleLp = new LinearLayout.LayoutParams(-1, -2);
-        subtitleLp.topMargin = dp(3);
+        subtitleLp.topMargin = dp(5);
+        subtitleLp.bottomMargin = dp(22);
         root.addView(subtitle, subtitleLp);
 
-        TextView programme = text("Военное ревю", 21, Color.WHITE, true);
-        LinearLayout.LayoutParams programmeLp = new LinearLayout.LayoutParams(-1, -2);
-        programmeLp.topMargin = dp(22);
-        root.addView(programme, programmeLp);
-        TextView host = text("Полковник Баранец", 15, Color.rgb(174, 183, 197), false);
-        LinearLayout.LayoutParams hostLp = new LinearLayout.LayoutParams(-1, -2);
-        hostLp.topMargin = dp(3);
-        hostLp.bottomMargin = dp(20);
-        root.addView(host, hostLp);
 
         LinearLayout statusCard = new LinearLayout(this);
         statusCard.setOrientation(LinearLayout.VERTICAL);
