@@ -62,7 +62,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private static final int SOURCE_RADIO = 2;
     private static final String[] SOURCE_NAMES = {"VK Видео", "RuTube", "Радио КП"};
     private static final String VK_LIVES_URL = "https://vkvideo.ru/@radiokp/lives";
-    private static final String RUTUBE_CHANNEL_URL = "https://rutube.ru/u/radiokp/";
+    private static final String RUTUBE_LIVE_FEED_URL = "https://rutube.ru/feeds/stream/";
     private static final String PREFS = "radio_kp_preferences";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -340,10 +340,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             return;
         }
         webSource = source;
-        currentPageUrl = source == SOURCE_VK ? VK_LIVES_URL : RUTUBE_CHANNEL_URL;
+        currentPageUrl = source == SOURCE_VK ? VK_LIVES_URL : RUTUBE_LIVE_FEED_URL;
         statusView.setText(source == SOURCE_VK
                 ? "Ищу текущую прямую трансляцию VK…"
-                : "Ищу действующую прямую трансляцию на канале RuTube…");
+                : "Ищу прямой эфир Радио КП в общей LIVE-ленте RuTube…");
         liveProgress.setIndeterminate(true);
         createWebViewIfNeeded();
         // Keep source discovery out of sight; the user can reveal the page only for manual selection.
@@ -357,7 +357,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         sourceTimeout = () -> {
             if (scheduledAttempt == attemptId && !streamStarted && currentSource == source) {
                 if (source == SOURCE_RUTUBE) {
-                    statusView.setText("Не удалось обнаружить активный эфир RuTube. Пробую следующий источник…");
+                    statusView.setText("В LIVE-ленте RuTube не найден эфир Радио КП. Перехожу к следующему источнику…");
                 } else {
                     statusView.setText("VK не ответил или эфир недоступен. Пробую RuTube…");
                 }
@@ -501,8 +501,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 currentPageUrl = url;
                 if (source == SOURCE_VK && (url.contains("login.vk.ru") || url.contains("login.vk.com"))) {
                     statusView.setText("VK просит авторизоваться. Войдите во встроенной странице и вернитесь к эфирам.");
-                } else if (source == SOURCE_RUTUBE && url.contains("/u/radiokp")) {
-                    statusView.setText("Открыт канал Радио КП на RuTube. Ищу пометку LIVE…");
+                } else if (source == SOURCE_RUTUBE && url.contains("/feeds/stream")) {
+                    statusView.setText("Открыта лента прямых эфиров RuTube. Ищу канал Радио КП…");
                 }
             }
 
@@ -513,7 +513,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                     if (url.contains("/@radiokp/lives")) view.evaluateJavascript(AUTO_OPEN_VK_LIVE_SCRIPT, null);
                 } else if (source == SOURCE_RUTUBE && isRutubePage(url)) {
                     view.evaluateJavascript(INSTALL_RUTUBE_HOOK_SCRIPT, null);
-                    if (url.contains("/u/radiokp")) view.evaluateJavascript(AUTO_OPEN_RUTUBE_LIVE_SCRIPT, null);
+                    if (url.contains("/feeds/stream")) view.evaluateJavascript(AUTO_OPEN_RUTUBE_LIVE_SCRIPT, null);
                 }
             }
 
@@ -622,12 +622,15 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             "XMLHttpRequest.prototype.send=function(){this.addEventListener('load',function(){try{report(this.responseText)}catch(e){}});return se.apply(this,arguments)};" +
             "}catch(e){}})();";
 
-    private static final String AUTO_OPEN_RUTUBE_LIVE_SCRIPT = "(function(){try{setTimeout(function(){" +
-            "var els=[].slice.call(document.querySelectorAll('a[href*=\"/video/\"]'));" +
-            "for(var i=0;i<els.length;i++){var a=els[i],p=a.closest('article,[data-testid],[class*=video],[class*=Video]')||a;" +
-            "var t=((a.innerText||'')+' '+(p.innerText||'')).toLowerCase();" +
-            "if((/\\blive\\b|прям.{0,8}эфир|идёт эфир|идет эфир|трансляция сейчас/.test(t))&&!/запись эфира|архив эфира/.test(t)){a.click();return;}}" +
-            "},1600)}catch(e){}})();";
+    private static final String AUTO_OPEN_RUTUBE_LIVE_SCRIPT = "(function(){try{" +
+            "function scan(){try{var els=[].slice.call(document.querySelectorAll('a[href*=\"/video/\"]'));" +
+            "for(var i=0;i<els.length;i++){var a=els[i],p=a;" +
+            "for(var d=0;p&&d<7;d++,p=p.parentElement){var t=(p.innerText||p.textContent||'').toLowerCase().replace(/\\s+/g,' ').trim();" +
+            "if(t.length<1600&&(t.indexOf('радио комсомольская правда')>=0||t.indexOf('радио «комсомольская правда»')>=0)){a.click();return true;}}}" +
+            "}catch(e){}return false;}" +
+            "var tries=0;function tick(){if(scan())return;if(++tries<32)setTimeout(tick,1000);}" +
+            "setTimeout(tick,1200);" +
+            "}catch(e){}})();";
 
     private final class StreamBridge {
         private final int source;
